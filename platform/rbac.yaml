@@ -1,0 +1,42 @@
+# Cluster-scoped (not a per-namespace Role) because the pr-<N> namespaces are
+# created dynamically by CI, so no namespaced Role can exist beforehand.
+# Scope is limited to the resource kinds charts/preview-app uses.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: preview-deployer
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [create, get, list, patch, delete]   # patch covers labelling
+  - apiGroups: [""]
+    resources: [services, secrets, configmaps, persistentvolumeclaims, resourcequotas, limitranges]
+    verbs: [create, get, list, watch, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods, pods/log, events]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [create, get, list, watch, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [replicasets]   # read by helm --wait
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, watch, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [create, get, list, watch, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: preview-deployer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: preview-deployer
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: preview-deployers

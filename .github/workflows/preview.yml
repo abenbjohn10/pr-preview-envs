@@ -1,0 +1,163 @@
+name: Preview
+
+# Build + deploy an ephemeral full-stack environment for every PR.
+# NOTE: deliberately `pull_request`, never `pull_request_target` — PR code
+# must never run with this repo's secrets/OIDC trust.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  deployments: write
+
+# One deploy per PR at a time; a new push cancels the in-flight one.
+concurrency:
+  group: preview-${{ github.event.number }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+  PR_NUMBER: ${{ github.event.number }}
+
+jobs:
+  build:
+    # Fork PRs get no OIDC token / write perms — skip them entirely.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          SHORT_SHA="${HEAD_SHA::7}"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=pr-${PR_NUMBER}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: app/backend
+          push: true
+          tags: ${{ vars.ECR_REGISTRY }}/preview-backend:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=preview-backend
+          cache-to: type=gha,scope=preview-backend,mode=max
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: app/frontend
+          push: true
+          tags: ${{ vars.ECR_REGISTRY }}/preview-frontend:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=preview-frontend
+          cache-to: type=gha,scope=preview-frontend,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: preview-pr-${{ github.event.number }}
+      url: ${{ steps.up.outputs.url }}
+    outputs:
+      url: ${{ steps.up.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${{ vars.EKS_CLUSTER_NAME }}" --region "${{ env.AWS_REGION }}"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Check concurrent preview limit
+        env:
+          MAX_PREVIEWS: ${{ vars.MAX_PREVIEWS || '5' }}
+        run: |
+          ACTIVE=$(kubectl get namespaces -l "preview=true,pr!=${PR_NUMBER}" -o name | wc -l | tr -d ' ')
+          echo "Active previews (excluding PR #${PR_NUMBER}): ${ACTIVE} / ${MAX_PREVIEWS}"
+          if (( ACTIVE >= MAX_PREVIEWS )); then
+            echo "::error::Preview limit reached (${ACTIVE}/${MAX_PREVIEWS}). Close a PR or wait for the janitor."
+            exit 1
+          fi
+
+      - name: Deploy preview
+        id: up
+        env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN }}
+          GIT_SHA: ${{ needs.build.outputs.short_sha }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: bash scripts/preview-up.sh "${PR_NUMBER}" "${IMAGE_TAG}"
+
+      - name: Smoke test
+        env:
+          URL: ${{ steps.up.outputs.url }}
+        run: |
+          echo "GET ${URL}/api/health"
+          curl -fsS --retry 12 --retry-delay 5 --retry-all-errors --max-time 10 "${URL}/api/health"
+          echo
+
+  comment:
+    needs: [build, deploy]
+    if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Timestamp
+        id: ts
+        run: echo "now=$(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
+
+      - name: Comment preview URL
+        if: needs.deploy.result == 'success'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: preview
+          message: |
+            ### 🚀 Preview environment ready
+
+            | | |
+            |---|---|
+            | **URL** | ${{ needs.deploy.outputs.url }} |
+            | **Commit** | `${{ needs.build.outputs.short_sha }}` |
+            | **Image tag** | `${{ needs.build.outputs.image_tag }}` |
+            | **Namespace** | `pr-${{ github.event.number }}` |
+            | **Updated** | ${{ steps.ts.outputs.now }} |
+
+            Redeploys on every push · destroyed when this PR is closed.
+
+      - name: Comment failure
+        if: needs.deploy.result != 'success'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: preview
+          message: |
+            ### ❌ Preview deployment failed
+
+            Commit `${{ github.event.pull_request.head.sha }}` · ${{ steps.ts.outputs.now }}
+
+            See the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for logs.

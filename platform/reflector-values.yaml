@@ -1,0 +1,4 @@
+# emberstack kubernetes-reflector: mirrors preview-wildcard-tls into pr-N namespaces
+resources:
+  requests: { cpu: 25m, memory: 64Mi }
+  limits: { cpu: 100m, memory: 128Mi }

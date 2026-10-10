@@ -1,0 +1,6 @@
+Preview environment for PR #{{ include "preview-app.pr" . }} deployed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+URL: {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ required "ingress.host is required" .Values.ingress.host }}
+
+  kubectl -n {{ .Release.Namespace }} get pods
+  kubectl -n {{ .Release.Namespace }} logs job/{{ .Release.Name }}-migrate

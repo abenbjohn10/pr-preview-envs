@@ -1,0 +1,62 @@
+# Set by scripts/preview-up.sh
+prNumber: ""
+gitSha: ""
+imageRegistry: REPLACE_ME_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
+
+backend:
+  image:
+    repository: preview-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 8000
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 250m, memory: 256Mi }
+
+frontend:
+  image:
+    repository: preview-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 8080
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 100m, memory: 64Mi }
+
+# One-shot Helm hook Job running `python -m app.migrate` (backend image)
+migrate:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 250m, memory: 256Mi }
+
+postgres:
+  image: postgres:16-alpine
+  user: preview
+  database: preview
+  persistence:
+    enabled: false   # emptyDir when false; data is lost with the pod
+    size: 1Gi
+    storageClass: gp2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+ingress:
+  className: nginx
+  host: ""           # required, e.g. pr-12.preview.example.com
+  tls:
+    enabled: true
+    secretName: preview-wildcard-tls   # reflected into pr-N namespaces by kubernetes-reflector
+
+quota:
+  enabled: true
+  cpu: "1"           # requests.cpu
+  memory: 1Gi        # requests.memory
+  limitsCpu: "2"
+  limitsMemory: 2Gi
+  pods: "10"
+  persistentVolumeClaims: "2"
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespace: ingress-nginx

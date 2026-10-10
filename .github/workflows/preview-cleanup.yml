@@ -1,0 +1,80 @@
+name: Preview Cleanup
+
+# Tear down the PR's environment on merge or close.
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  deployments: write
+
+concurrency:
+  group: preview-${{ github.event.number }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+  PR_NUMBER: ${{ github.event.number }}
+
+jobs:
+  destroy:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${{ vars.EKS_CLUSTER_NAME }}" --region "${{ env.AWS_REGION }}"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Destroy preview
+        run: bash scripts/preview-down.sh "${PR_NUMBER}"
+
+      - name: Delete PR images from ECR
+        run: |
+          for REPO in preview-backend preview-frontend; do
+            IDS=$(aws ecr list-images --repository-name "${REPO}" --filter tagStatus=TAGGED \
+              --query "imageIds[?starts_with(imageTag, 'pr-${PR_NUMBER}-')]" --output json)
+            COUNT=$(echo "${IDS}" | jq 'length')
+            if [[ "${COUNT}" -eq 0 ]]; then
+              echo "${REPO}: no pr-${PR_NUMBER}- images"
+              continue
+            fi
+            echo "${REPO}: deleting ${COUNT} image tag(s)"
+            # batch-delete-image accepts at most 100 ids per call
+            echo "${IDS}" | jq -c '. as $a | range(0; length; 100) | $a[.:(. + 100)]' | while read -r CHUNK; do
+              aws ecr batch-delete-image --repository-name "${REPO}" --image-ids "${CHUNK}" \
+                --query 'failures' --output text
+            done
+          done
+
+      - name: Mark deployments inactive
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ENV_NAME="preview-pr-${PR_NUMBER}"
+          for ID in $(gh api "repos/${{ github.repository }}/deployments?environment=${ENV_NAME}" --jq '.[].id'); do
+            gh api -X POST "repos/${{ github.repository }}/deployments/${ID}/statuses" -f state=inactive >/dev/null
+            echo "deployment ${ID} → inactive"
+          done
+
+      - name: Update PR comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: preview
+          message: |
+            ### 🧹 Preview destroyed
+
+            Namespace `pr-${{ github.event.number }}` and its `pr-${{ github.event.number }}-*` images were removed when this PR was ${{ github.event.pull_request.merged && 'merged' || 'closed' }}.

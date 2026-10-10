@@ -1,0 +1,46 @@
+{{- if .Values.networkPolicy.enabled }}
+# Non-postgres pods: ingress only from this namespace and the ingress controller.
+# (NetworkPolicies are additive, so postgres is excluded here and has its own stricter policy.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-default
+  labels:
+    {{- include "preview-app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: NotIn
+        values: [postgres]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+---
+# Postgres: only the backend and migration pods in this namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-postgres
+  labels:
+    {{- include "preview-app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "preview-app.selector" (dict "root" . "component" "postgres") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: [backend, migrate]
+          # same-namespace only (podSelector without namespaceSelector)
+      ports:
+        - port: 5432
+{{- end }}

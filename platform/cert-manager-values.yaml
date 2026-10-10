@@ -1,0 +1,11 @@
+# helm upgrade --install cert-manager jetstack/cert-manager -n cert-manager -f this
+crds:
+  enabled: true
+  keep: true
+serviceAccount:
+  annotations:
+    # IRSA role with route53:ChangeResourceRecordSets on the hosted zone (from terraform)
+    eks.amazonaws.com/role-arn: REPLACE_ME_CERT_MANAGER_ROLE_ARN
+# IRSA tokens are readable by the non-root cert-manager user
+securityContext:
+  fsGroup: 1001
